@@ -1,0 +1,19 @@
+{
+  "name": "rana",
+  "version": "1.0.0",
+  "description": "Yuzuhare Rana",
+  "main": "main.js",
+  "scripts": {
+    "start": "node main.js",
+    "debug": "node debug.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "daichimarukana",
+  "license": "UPUL",
+  "type": "commonjs",
+  "dependencies": {
+    "better-sqlite3": "^12.5.0",
+    "kuromoji": "^0.1.2"
+  }
+}

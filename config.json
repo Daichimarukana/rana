@@ -1,0 +1,7 @@
+{
+    "host": "uwuzu.example.com",
+    "api_token": "NZUZxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "random_ueuse": true,
+    "check_interval": 300,
+    "rana_core_log": false
+}
