@@ -193,10 +193,23 @@ async function processReply(targetId, repliedIds, studyIds) {
     console.log(postData)
     if (studyIds.has(postData.replyid)) {
         const QuestionSubData = await getPostById(postData.replyid);
-        const QuestionData = await getPostById(QuestionSubData.replyid);
-        replyText = rana.studyInputText(QuestionData.text, cleanedText);
+        
+        if (QuestionSubData && QuestionSubData.replyid) {
+            const QuestionData = await getPostById(QuestionSubData.replyid);
+            
+            if (QuestionData && QuestionData.text) {
+                replyText = rana.studyInputText(QuestionData.text, cleanedText);
+            } else {
+                console.warn("学習元の投稿(QuestionData)が見つかりませんでした。");
+                replyText = rana.generateInputText(cleanedText); 
+            }
+        } else {
+            console.warn("学習元の投稿(QuestionSubData)が見つからないか、親IDがありません。");
+            replyText = rana.generateInputText(cleanedText);
+        }
+        
         studyIds.delete(QuestionSubData.uniqid);
-    }else{
+    } else {
         replyText = rana.generateInputText(cleanedText);
     }
 
