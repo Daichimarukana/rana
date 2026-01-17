@@ -198,19 +198,19 @@ async function processReply(targetId, repliedIds, studyIds) {
             const QuestionData = await getPostById(QuestionSubData.replyid);
             
             if (QuestionData && QuestionData.text) {
-                replyText = rana.studyInputText(QuestionData.text, cleanedText);
+                replyText = rana.studyInputText(QuestionData.text, cleanedText, postData.account.userid);
             } else {
                 console.warn("学習元の投稿(QuestionData)が見つかりませんでした。");
-                replyText = rana.generateInputText(cleanedText); 
+                replyText = rana.generateInputText(cleanedText, postData.account.userid); 
             }
         } else {
             console.warn("学習元の投稿(QuestionSubData)が見つからないか、親IDがありません。");
-            replyText = rana.generateInputText(cleanedText);
+            replyText = rana.generateInputText(cleanedText, postData.account.userid);
         }
         
         studyIds.delete(QuestionSubData.uniqid);
     } else {
-        replyText = rana.generateInputText(cleanedText);
+        replyText = rana.generateInputText(cleanedText, postData.account.userid);
     }
 
     if(replyText == "ごめんなさい...よくわかりませんでした..."){

@@ -41,7 +41,7 @@ async function main() {
             continue;
         }
 
-        const replyText = await rana.generateInputText(cleanedText);
+        const replyText = await rana.generateInputText(cleanedText, "debug");
         console.log(`\nらなの返答: ${replyText}`);
 
         const failureMessage = "ごめんなさい...よくわかりませんでした...";
@@ -58,7 +58,7 @@ async function main() {
                     studyMode = false; // ループを抜ける
                 } else if (idealAnswer.trim() !== '') {
                     try {
-                        console.log(await rana.studyInputText(cleanedText, idealAnswer));
+                        console.log(await rana.studyInputText(cleanedText, idealAnswer, "debug"));
                         studyMode = false;
                     } catch (error) {
                         console.error("学習処理中にエラーが発生しました:", error);

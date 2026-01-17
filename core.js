@@ -53,6 +53,16 @@ function ranaLog(label, ...args) {
 
     console.log(`${formattedTime}${PREFIX}${paddedLabel}: ${message}`);
 }
+
+// -------- ＞ 記 憶 ＜ --------
+const talkContexts = {};
+function getOrCreateContext(talkId) {
+    if (!talkContexts[talkId]) {
+        talkContexts[talkId] = { keywords: [], lastSeen: Date.now() };
+    }
+    return talkContexts[talkId];
+}
+
 // -------- kuromoji 初期化 (非同期だが CLI 起動で await) --------
 function buildTokenizer() {
     return new Promise((resolve, reject) => {
@@ -62,6 +72,26 @@ function buildTokenizer() {
             resolve(tokenizer);
         });
     });
+}
+
+// -------- 記憶に余計なものを混ぜない --------
+function filterNouns(text) {
+    if (!text || !globalTokenizer) return [];
+
+    const tokens = globalTokenizer.tokenize(text);
+
+    return tokens
+        .filter(t => {
+            if (t.pos !== '名詞') return false;
+
+            const excludeDetails = ['非自立', '代名詞', '数', '接尾'];
+            if (excludeDetails.includes(t.pos_detail_1)) return false;
+
+            if (t.surface_form.length < 1) return false;
+
+            return true;
+        })
+        .map(t => t.surface_form);
 }
 
 // -------- トークン化（原形があれば原形を使う） --------
@@ -219,21 +249,55 @@ function rebuildAllVectors() {
     return { vocab, df };
 }
 
-// getAnswer: 入力文章から最適な応答（Markov生成） or 学習要求を返す
-function getAnswerForInput(inputTokens) {
-    const allRows = selectAllStmt.all(); // includes answered and unanswered
+function getAnswerForInput(currentTokens, contextTokens = [], talkId = null) {
+    const allRows = selectAllStmt.all();
     const answeredRows = allRows.filter(r => r.answer);
-    // tokensList includes ALL answered rows tokens + current input tokens for TF-IDF calc
-    const tokensList = answeredRows.map(r => JSON.parse(r.tokens || '[]')).concat([inputTokens]);
-    if (tokensList.length === 1) {
-        // データが全く無い（最初の1件だけ）：必ず学習フロー
-        return { needTeach: true, reason: 'no_data' };
-    }
-    const { vocab, df } = buildVocabAndDf(tokensList);
-    const vectors = computeTfIdfVectors(tokensList, vocab, df);
-    const inputVec = vectors[vectors.length - 1];
 
-    // compute score for each answeredRow
+    // 1. 時間による減衰率 (timeDecay) の計算
+    let timeDecay = 1.0; 
+    const now = Date.now();
+
+    if (talkId && talkContexts[talkId]) {
+        ranaLog("Generating Talk ID", talkId);
+        const msPassed = now - talkContexts[talkId].lastSeen;
+        const hoursPassed = msPassed / (1000 * 60 * 60);
+        
+        // 半減期を2時間に設定（2時間空くと記憶の重みが半分になる）
+        timeDecay = Math.pow(0.5, hoursPassed / 2.0);
+        ranaLog("Generating Time Decay", `経過時間: ${hoursPassed.toFixed(2)}H, 減衰率: ${timeDecay.toFixed(4)}`);
+    }
+
+    // 全体の単語リスト（TF-IDF計算用）には全部混ぜて入れる
+    const combinedInput = [...currentTokens, ...contextTokens];
+    const tokensList = answeredRows.map(r => JSON.parse(r.tokens || '[]')).concat([combinedInput]);
+
+    if (tokensList.length === 1) return { needTeach: true, reason: 'no_data' };
+
+    const { vocab, df } = buildVocabAndDf(tokensList);
+    const N = tokensList.length;
+    const idf = vocab.map(term => {
+        const d = df.get(term) || 0;
+        return Math.log((N + 1) / (d + 1)) + 1;
+    });
+
+    // --- ここがポイント：入力ベクトルの重み付け ---
+    const inputTf = new Map();
+    currentTokens.forEach(t => inputTf.set(t, (inputTf.get(t) || 0) + 2.0));
+
+    const CONTEXT_START_RATIO = 0.8;
+    contextTokens.forEach((t, index) => {
+        const positionRatio = (index + 1) / contextTokens.length;
+        const freshnessWeight = 2.0 * CONTEXT_START_RATIO * Math.pow(positionRatio, 2) * timeDecay;
+        inputTf.set(t, (inputTf.get(t) || 0) + freshnessWeight);
+        ranaLog("Generating Context Weight", freshnessWeight);
+    });
+
+    // 3. ベクトル作成
+    const inputVec = vocab.map((term, i) => (inputTf.get(term) || 0) * idf[i]);
+    // ------------------------------------------
+
+    const vectors = computeTfIdfVectors(answeredRows.map(r => JSON.parse(r.tokens || '[]')), vocab, df);
+
     const candidates = answeredRows.map((r, idx) => {
         const vec = vectors[idx];
         const score = cosine(inputVec, vec);
@@ -245,6 +309,7 @@ function getAnswerForInput(inputTokens) {
     }
 
     const highSimilarityCandidates = candidates.filter(c => c.score >= SIM_THRESHOLD);
+    ranaLog("Generating Candidates", highSimilarityCandidates);
 
     // 閾値を超える候補が3件以下の場合
     if (highSimilarityCandidates.length <= 3) {
@@ -262,7 +327,7 @@ function getAnswerForInput(inputTokens) {
 
     const sequences = top.map(t => tokenizeToArray(globalTokenizer, t.row.answer));
     const table = buildMarkovTable(MARKOV_ORDER, sequences);
-    const generated = generateFromMarkov(table, MARKOV_ORDER, inputTokens);
+    const generated = generateFromMarkov(table, MARKOV_ORDER, currentTokens);
     const finalReply = (generated && generated.length >= 4) ? generated : top[0].row.answer;
 
     return {
@@ -367,7 +432,7 @@ function generateRandomText() {
 }
 
 // これは質問に答えるやつ
-function generateInputText(input) {
+function generateInputTextSingle(input) {
     ranaLog("Generating Start", "生成を開始しました！");
     ranaLog("Generating Input", input);
     const tokens = tokenizeToArray(globalTokenizer, input);
@@ -377,6 +442,51 @@ function generateInputText(input) {
         ranaLog("Generate Error", "生成できませんでした...");
         return "ごめんなさい...よくわかりませんでした...";
     } else {
+        ranaLog("Generate Result", result.reply);
+        return result.reply;
+    }
+}
+
+function generateInputText(input, talkId) {
+    ranaLog("Generating Start", "生成を開始しました！");
+    ranaLog("Generating Input", input);
+
+    let conversationContext = getOrCreateContext(talkId);
+    const currentTokens = tokenizeToArray(globalTokenizer, input);
+
+    ranaLog("Generating Current Context", currentTokens);
+    ranaLog("Generating Conversation Context", conversationContext.keywords);
+
+    const result = getAnswerForInput(currentTokens, conversationContext.keywords, talkId);
+    
+    ranaLog("Generate Raw Result", result);
+    
+    if (result.needTeach) {
+        return "ごめんなさい...よくわかりませんでした...";
+    } else {
+        const currentKeywords = filterNouns(input);
+        const replyKeywords = filterNouns(result.reply);
+
+        const msPassed = Date.now() - conversationContext.lastSeen;
+        const hoursPassed = msPassed / (1000 * 60 * 60);
+        const timeDecay = Math.pow(0.5, hoursPassed / 2.0);
+
+        const survivedContext = conversationContext.keywords.filter((word, index) => {
+            const positionRatio = (index + 1) / conversationContext.keywords.length;
+            const weight = 2.0 * 0.8 * Math.pow(positionRatio, 2) * timeDecay;
+            return weight >= 0.1;
+        });
+
+        const rawList = [...survivedContext, ...currentKeywords, ...replyKeywords];
+        const latestFirst = rawList.reverse();
+        const uniqueLatest = Array.from(new Set(latestFirst)).reverse().slice(-10);
+
+        talkContexts[talkId] = {
+            keywords: uniqueLatest,
+            lastSeen: Date.now()
+        };
+        ranaLog("Generating talkContexts", talkContexts[talkId]);
+
         ranaLog("Generate Result", result.reply);
         return result.reply;
     }
@@ -421,12 +531,16 @@ function generateThanksText(template) {
 }
 
 // お勉強はこちら
-function studyInputText(Question, Answer) {
+function studyInputText(Question, Answer, talkId) {
     ranaLog("Learning Start", "学習を開始しました！");
     ranaLog("Learning Question", Question);
     ranaLog("Learning Answer", Answer);
 
-    const tokens = tokenizeToArray(globalTokenizer, Question);
+    let conversationContext = getOrCreateContext(talkId).keywords;
+    const recentContext = conversationContext.slice(-3);
+    const contextualQuestion_No_Spaces = recentContext.join("") ? `${recentContext.join("")}${Question}` : Question;
+
+    const tokens = tokenizeToArray(globalTokenizer, contextualQuestion_No_Spaces);
     teachAnswer(Question, Answer, tokens);
 
     const thanks_to_user = [
@@ -450,6 +564,7 @@ function studyInputText(Question, Answer) {
 module.exports = {
     init,
     generateRandomText,
+    generateInputTextSingle,
     generateInputText,
     tokenizeToArray,
     getAnswerForInput,
