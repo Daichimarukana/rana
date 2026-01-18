@@ -536,12 +536,12 @@ function studyInputText(Question, Answer, talkId) {
     ranaLog("Learning Question", Question);
     ranaLog("Learning Answer", Answer);
 
-    let conversationContext = getOrCreateContext(talkId).keywords;
+    const conversationContext = getOrCreateContext(talkId).keywords;
     const recentContext = conversationContext.slice(-3);
-    const contextualQuestion_No_Spaces = recentContext.join("") ? `${recentContext.join("")}${Question}` : Question;
 
-    const tokens = tokenizeToArray(globalTokenizer, contextualQuestion_No_Spaces);
-    teachAnswer(Question, Answer, tokens);
+    const questionTokens = tokenizeToArray(globalTokenizer, Question);
+    const combinedTokens = [...recentContext, ...questionTokens];
+    teachAnswer(Question, Answer, combinedTokens);
 
     const thanks_to_user = [
         "教えてくださりありがとうございます...！",
