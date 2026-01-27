@@ -2,6 +2,7 @@ const rana = require('./core.js');
 const fs = require('fs');
 const path = require('path');
 const config = require('./config.json');
+const filter_words = require('./filter_words.json');
 
 // 返信済みIDを保存するファイルパス(いつかはSQLiteとかに移行したほうが良いのかも？)
 const REPLIED_IDS_FILE = path.join(__dirname, 'replied_ids.json');
@@ -12,7 +13,38 @@ const API_TOKEN = config.api_token;
 const CHECK_INTERVAL = config.check_interval * 1000; // 5分間隔（ミリ秒）
 const RANDOM_UEUSE = config.random_ueuse;
 const CORE_LOG = config.rana_core_log;
+const IS_FILTER = config.is_filter ?? false;
 // ------------------------------------
+
+// ------規制処理-------
+function generateMaskLabel(length) {
+    const label = "自主規制";
+
+    if (length <= 4) {
+        return `**[${label.substring(0, length)}]**`;
+    }
+    const totalPadding = length - label.length;
+    const leftPaddingSize = Math.floor(totalPadding / 2);
+    const rightPaddingSize = totalPadding - leftPaddingSize;
+
+    const leftSpace = ' '.repeat(leftPaddingSize);
+    const rightSpace = ' '.repeat(rightPaddingSize);
+
+    return `**[${leftSpace}${label}${rightSpace}]**`;
+}
+
+function SayFilter(input, wordList) {
+    if (!input || wordList.length === 0) return input;
+
+    const escapedWords = wordList.map(word =>
+        word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    );
+    const pattern = new RegExp(escapedWords.join('|'), 'g');
+
+    return input.replace(pattern, (match) => {
+        return generateMaskLabel(match.length);
+    });
+}
 
 function getRandomInterval() {
     // ミリ秒単位で計算する
@@ -50,6 +82,9 @@ async function randomPostLoop() {
 
     // ランダムなテキストを生成
     const postText = rana.generateRandomText();
+    if (IS_FILTER === true){
+        postText = SayFilter(postText, filter_words.forbiddenWords);
+    }
     console.log(`投稿テキスト: "${postText}"`);
 
     // 投稿するAPIを叩く
@@ -219,6 +254,9 @@ async function processReply(targetId, repliedIds, studyIds) {
         studyIds.add(replyResult.uniqid);
         console.log(studyIds);
     }else{
+        if (IS_FILTER === true){
+            replyText = SayFilter(replyText, filter_words.forbiddenWords);
+        }
         replyResult = await replyToPost(targetId, replyText);
     }
 
