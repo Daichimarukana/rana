@@ -81,7 +81,7 @@ async function randomPostLoop() {
     console.log(`[${new Date().toLocaleString()}] ランダム投稿を開始します...`);
 
     // ランダムなテキストを生成
-    const postText = rana.generateRandomText();
+    var postText = rana.generateRandomText();
     if (IS_FILTER === true){
         postText = SayFilter(postText, filter_words.forbiddenWords);
     }
