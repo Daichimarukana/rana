@@ -58,9 +58,50 @@ function ranaLog(label, ...args) {
 const talkContexts = {};
 function getOrCreateContext(talkId) {
     if (!talkContexts[talkId]) {
-        talkContexts[talkId] = { keywords: [], lastSeen: Date.now() };
+        talkContexts[talkId] = { 
+            keywords: [], 
+            lastSeen: Date.now(),
+            pendingQuestion_token: null,
+            pendingAnswer_token: null
+        };
     }
     return talkContexts[talkId];
+}
+
+// --------- 自動学習 ---------
+function estimateSatisfaction(userInput, talkId) {
+    const tokens = tokenizeToArray(globalTokenizer, userInput);
+    const nouns = filterNouns(userInput);
+    const context = getOrCreateContext(talkId);
+
+    const hasQuestion = userInput.includes('？') || userInput.includes('?') || 
+                        tokens.some(t => ['なぜ', 'どうして', '何で', 'なんで', 'なにゆえ', '何故'].includes(t));
+    if (hasQuestion) return 0;
+
+    let infoDensityScore = 0;
+    if (tokens.length <= 5 && nouns.length === 0) {
+        infoDensityScore = 0.8;
+    }
+
+    let consistencyScore = 0;
+    if (context.keywords.length > 0) {
+        const overlap = nouns.filter(n => context.keywords.includes(n));
+        if (nouns.length === 0 || overlap.length > 0) {
+            consistencyScore = 0.5;
+        }
+    }
+
+    const positiveWords = ['なるほど', '納得', 'そうなんだ', 'わかった', 'ありがとう', 'いいね', 'よかった'];
+    const negativeWords = ['違う', 'いや', 'は？', '意味わかんない', 'ごめん', '？', '?'];
+
+    let keywordScore = 0;
+    if (tokens.some(t => positiveWords.includes(t))) keywordScore += 0.5;
+    if (tokens.some(t => negativeWords.includes(t))) return 0;
+
+    if (userInput.length <= 1) return 0;
+
+    let baseScore = Math.max(infoDensityScore, keywordScore);
+    return Math.min(1.0, baseScore + consistencyScore);
 }
 
 // -------- kuromoji 初期化 (非同期だが CLI 起動で await) --------
@@ -265,13 +306,47 @@ function getAnswerForInput(currentTokens, contextTokens = [], talkId = null) {
         // 半減期を2時間に設定（2時間空くと記憶の重みが半分になる）
         timeDecay = Math.pow(0.5, hoursPassed / 2.0);
         ranaLog("Generating Time Decay", `経過時間: ${hoursPassed.toFixed(2)}H, 減衰率: ${timeDecay.toFixed(4)}`);
+
+        ranaLog("Auto Learning Context", "Question:"+talkContexts[talkId].pendingQuestion_token+", Answer:"+talkContexts[talkId].pendingAnswer_token)
+
+        if (talkId && talkContexts[talkId]) {
+            const context = talkContexts[talkId];
+            if (context.pendingQuestion_token && context.pendingAnswer_token) {
+                let score = estimateSatisfaction(currentTokens.join(''), talkId);
+                ranaLog("Auto Learning", "スコア: " + score);
+                if (score >= 0.75) {
+                    const conversationContext = getOrCreateContext(talkId).keywords;
+                    const recentContext = conversationContext.slice(-3); 
+
+                    const combinedTokens = [...recentContext, ...context.pendingQuestion_token];
+                    teachAnswer(
+                        context.pendingQuestion_token.join(''),
+                        context.pendingAnswer_token.join(''),
+                        combinedTokens
+                    );
+
+                    context.pendingQuestion_token = null;
+                    context.pendingAnswer_token = null;
+                }
+            }
+        }
     }
 
     // 全体の単語リスト（TF-IDF計算用）には全部混ぜて入れる
     const combinedInput = [...currentTokens, ...contextTokens];
     const tokensList = answeredRows.map(r => JSON.parse(r.tokens || '[]')).concat([combinedInput]);
 
-    if (tokensList.length === 1) return { needTeach: true, reason: 'no_data' };
+    if (tokensList.length === 1){
+        if (talkId && talkContexts[talkId]) {
+            talkContexts[talkId].pendingQuestion_token = null;
+            talkContexts[talkId].pendingAnswer_token = null;
+        }
+
+        return { 
+            needTeach: true,
+            reason: 'no_data' 
+        };
+    } 
 
     const { vocab, df } = buildVocabAndDf(tokensList);
     const N = tokensList.length;
@@ -312,16 +387,23 @@ function getAnswerForInput(currentTokens, contextTokens = [], talkId = null) {
     ranaLog("Generating Candidates", highSimilarityCandidates);
 
     // 閾値を超える候補が3件以下の場合
-    if (highSimilarityCandidates.length <= 3) {
-        // 2/3の確率で学習モードにすることでもっと頭を良くしようっていう感じ
+    if (candidates.filter(c => c.score >= SIM_THRESHOLD).length <= 3 && !talkId) {
         if (Math.random() < 2 / 3) {
-            return { needTeach: true, reason: 'less_than_3_high_sim_candidates', bestScore: candidates[0].score };
+            return { 
+                needTeach: true, 
+                reason: 'less_than_3_high_sim_candidates', 
+                bestScore: candidates[0].score 
+            };
         }
     }
 
     const top = candidates.slice(0, TOP_K).filter(x => x.row.answer);
     const answerTexts = top.map(x => x.row.answer).filter(Boolean);
     if (answerTexts.length === 0) {
+        if (talkId && talkContexts[talkId]) {
+            talkContexts[talkId].pendingQuestion_token = null;
+            talkContexts[talkId].pendingAnswer_token = null;
+        }
         return { needTeach: true, reason: 'no_answer_text' };
     }
 
@@ -329,6 +411,11 @@ function getAnswerForInput(currentTokens, contextTokens = [], talkId = null) {
     const table = buildMarkovTable(MARKOV_ORDER, sequences);
     const generated = generateFromMarkov(table, MARKOV_ORDER, currentTokens);
     const finalReply = (generated && generated.length >= 4) ? generated : top[0].row.answer;
+
+    if (talkId && talkContexts[talkId]) {
+        talkContexts[talkId].pendingQuestion_token = currentTokens;
+        talkContexts[talkId].pendingAnswer_token = tokenizeToArray(globalTokenizer, finalReply);
+    }
 
     return {
         needTeach: false,
@@ -481,10 +568,10 @@ function generateInputText(input, talkId) {
         const latestFirst = rawList.reverse();
         const uniqueLatest = Array.from(new Set(latestFirst)).reverse().slice(-10);
 
-        talkContexts[talkId] = {
+        Object.assign(talkContexts[talkId], {
             keywords: uniqueLatest,
             lastSeen: Date.now()
-        };
+        });
         ranaLog("Generating talkContexts", talkContexts[talkId]);
 
         ranaLog("Generate Result", result.reply);
