@@ -4,7 +4,7 @@ const kuromoji = require('kuromoji');
 const Database = require('better-sqlite3');
 const path = require('path');
 
-const DB_PATH = './memory.db';
+const DB_PATH = path.join(__dirname, './memory.db');
 const MARKOV_ORDER = 3;   //n-gramのやつらしい(例外的にお礼メッセージは2か3)
 const TOP_K = 5;          //類似上位 K 件をマルコフモデルに使うらしい
 const SIM_THRESHOLD = 0.5; //類似度の閾値
@@ -449,6 +449,12 @@ function sampleArray(array, n) {
     return result;
 }
 
+function tokenCounter(text){
+    const tokens = tokenizeToArray(globalTokenizer, text);
+    ranaLog("Token Counter", tokens.length);
+    return tokens.length;
+}
+
 // あらかじめ用意しておく定型文(たまに呟くときに使う)
 const casualMutterings = [
     "お腹すいたなー。",
@@ -655,5 +661,6 @@ module.exports = {
     generateInputText,
     tokenizeToArray,
     getAnswerForInput,
-    studyInputText
+    studyInputText,
+    tokenCounter
 };
