@@ -1,84 +1,52 @@
-// ほぼAI生成です。許せ～～～～～
-const rana = require('./core.js');
+// 素のAI生成 許せ～～～～～
 const readline = require('readline');
+const RanaOrganism = require('./core.js');
 
-const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout
-});
-
-function askQuestion(prompt) {
-    return new Promise((resolve) => {
-        rl.question(prompt, (answer) => {
-            resolve(answer);
-        });
-    });
-}
-
-/**
- * メインの対話ループ
- */
 async function main() {
-    console.log("--- 対話・学習CLIツールへようこそ ---");
-    console.log("   質問を入力してください。'exit'で終了、'cancel'で学習モードを中止、'rnd'でランダム生成(つぶやき)ができます。");
-    console.log("-------------------------------------------");
+    const rana = new RanaOrganism(undefined, true);
+    await rana.init();
 
-    while (true) {
-        const cleanedText = await askQuestion("\n> あなたの質問: ");
+    // 1. 各種イベントのリスナー登録
+    rana.on('speak', (text) => {
+        console.log(`\n🗣️ [Ranaの独り言]: ${text}`);
+    });
 
-        if (cleanedText.toLowerCase() === 'exit') {
-            console.log("ツールを終了します。");
-            rl.close();
-            break;
-        }
+    rana.on('action', (act) => {
+        console.log(`\n⚡ [Ranaが行動しました]: ${act.type} (引数: ${act.query || 'なし'})`);
+    });
 
-        if (cleanedText.trim() === '') {
-            continue;
-        }
+    rana.on('action_failed', (fail) => {
+        console.log(`\n❓ [Ranaが困惑]: 存在しない行動「${fail.action}」をやろうとして失敗しました`);
+    });
 
-        if(cleanedText == "rnd"){
-            console.log(rana.generateRandomText());
-            continue;
-        }
+    rana.on('sleep', () => {
+        console.log('\n🌙 [Rana]: ぐぅ……（眠りにつきました）');
+    });
 
-        const replyText = await rana.generateInputText(cleanedText, "debug");
-        console.log(`\nらなの返答: ${replyText}`);
+    rana.on('wake', (data) => {
+        console.log(`\n☀️ [Rana]: はっ、起きた！（夢の焦点: ${data.focus.join(', ')}）`);
+    });
 
-        const failureMessage = "ごめんなさい...よくわかりませんでした...";
-        if (replyText === failureMessage) {
-            console.log("\n適切な回答が記憶になかったため、学習モードに入ります。");
-            console.log("理想的な回答を入力してください。");
+    rana.on('learn', (data) => {
+        console.log(`\n📚 [学習]: 「${data.question}」→「${data.answer}」を記憶しました`);
+    });
 
-            let studyMode = true;
-            while (studyMode) {
-                const idealAnswer = await askQuestion("理想的な回答 (または 'cancel'で中止): ");
+    // 2. 思考ストリームをバックグラウンドで開始（ノンブロッキング）
+    rana.start();
 
-                if (idealAnswer.toLowerCase() === 'cancel') {
-                    console.log("学習モードを中止しました。通常の対話に戻ります。");
-                    studyMode = false; // ループを抜ける
-                } else if (idealAnswer.trim() !== '') {
-                    try {
-                        console.log(await rana.studyInputText(cleanedText, idealAnswer, "debug"));
-                        studyMode = false;
-                    } catch (error) {
-                        console.error("学習処理中にエラーが発生しました:", error);
-                        console.log("再度理想的な回答を入力してください。または'cancel'で中止します。");
-                    }
-                }
-            }
-        }
-    }
+    // 3. コンソールからいつでも割り込んで話しかけられるようにする
+    const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout
+    });
+
+    console.log("何か話しかけてみてください（Enterで送信 / そのままでも勝手に考えます）:");
+
+    rl.on('line', async (line) => {
+        if (!line.trim()) return;
+        const reply = await rana.interact(line, 'cli_user');
+        console.log(`[Ranaの返答]: ${reply}`);
+    });
 }
 
-rana.init().then(() => {
-    main().catch(error => {
-        console.error("致命的なエラーが発生しました:", error);
-        rl.close();
-    });
-}).catch(err => {
-    console.error("Initialization failed:", err);
-});
-
-rl.on('close', () => {
-    process.exit(0);
-});
+main();

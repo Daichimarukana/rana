@@ -1,11 +1,12 @@
-const rana = require('./core.js');
+const RanaOrganism = require('./core.js');
+const { setApiBridge } = require('./actions.js');
 const fs = require('fs');
 const path = require('path');
 const config = require('./config.json');
 const filter_words = require('./filter_words.json');
-const Database = require('better-sqlite3'); // SQLiteライブラリ
+const Database = require('better-sqlite3');
 
-// SQLiteデータベースの初期化
+// --- SQLiteデータベースの初期化 ---
 const db = new Database('bot_data.db');
 db.exec(`
     CREATE TABLE IF NOT EXISTS replied_ids (id TEXT PRIMARY KEY);
@@ -20,39 +21,39 @@ const REPLIED_IDS_FILE = path.join(__dirname, 'replied_ids.json');
 // --- 設定 ---
 const API_DOMAIN = config.host;
 const API_TOKEN = config.api_token;
-const CHECK_INTERVAL = config.check_interval * 1000;
-const RANDOM_UEUSE = config.random_ueuse;
-const CORE_LOG = config.rana_core_log;
+const CHECK_INTERVAL = (config.check_interval || 10) * 1000;
+const CORE_LOG = config.rana_core_log ?? false;
 const IS_FILTER = config.is_filter ?? false;
 
-// 既読チェック
+const rana = new RanaOrganism(undefined, CORE_LOG);
+
 function isReplied(id) {
     const row = db.prepare('SELECT id FROM replied_ids WHERE id = ?').get(id);
     return !!row;
 }
 
-// 既読保存
 function addReplied(id) {
     db.prepare('INSERT OR IGNORE INTO replied_ids (id) VALUES (?)').run(id);
 }
 
-// 同意情報を取得する（日時を含めて返す）
 function getAgreement(userId) {
     return db.prepare('SELECT userid, agreed_at FROM agreed_users WHERE userid = ?').get(userId);
 }
 
-// 同意保存（現在時刻を記録）
 function setAgreed(userId) {
     const now = new Date().toISOString();
     db.prepare('INSERT OR REPLACE INTO agreed_users (userid, agreed_at) VALUES (?, ?)').run(userId, now);
 }
 
-// 同意取り消し
 function revokeAgreement(userId) {
     db.prepare('DELETE FROM agreed_users WHERE userid = ?').run(userId);
 }
 
-// JSONからSQLiteへの自動移行
+function isUserAgreed(userId) {
+    return !!getAgreement(userId);
+}
+
+// JSONからSQLiteへの移行
 function migrateFromJson() {
     if (fs.existsSync(REPLIED_IDS_FILE)) {
         try {
@@ -63,8 +64,6 @@ function migrateFromJson() {
                 for (const id of ids) insert.run(id);
             });
             transaction(data);
-            
-            // 移行完了後にリネーム（バックアップとして残す）
             fs.renameSync(REPLIED_IDS_FILE, REPLIED_IDS_FILE + '.bak');
             console.log('移行が完了しました。');
         } catch (error) {
@@ -83,41 +82,71 @@ function generateMaskLabel(length) {
 }
 
 function SayFilter(input, wordList) {
-    if (!input || wordList.length === 0) return input;
+    if (!IS_FILTER || !input || !wordList || wordList.length === 0) return input;
     const escapedWords = wordList.map(word => word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
     const pattern = new RegExp(escapedWords.join('|'), 'g');
     return input.replace(pattern, (match) => generateMaskLabel(match.length));
 }
 
-function getRandomInterval() {
-    const minMinutes = 3;
-    const maxMinutes = 180;
-    const interval = Math.random() * (maxMinutes - minMinutes) + minMinutes;
-    return interval * 60 * 1000;
+async function postUeuse(text, replyId = null) {
+    const filteredText = SayFilter(text, filter_words.forbiddenWords);
+    const url = `https://${API_DOMAIN}/api/ueuse/create`;
+    const payload = { token: API_TOKEN, text: filteredText };
+    if (replyId) payload.replyid = replyId;
+
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    });
+    return await response.json();
 }
 
-async function randomPostLoop() {
-    console.log(`[${new Date().toLocaleString()}] ランダム投稿を開始します...`);
-    let postText = rana.generateRandomText();
-    if (IS_FILTER === true) postText = SayFilter(postText, filter_words.forbiddenWords);
-    
-    const url = `https://${API_DOMAIN}/api/ueuse/create`;
+async function followUser(userId) {
+    const url = `https://${API_DOMAIN}/api/users/follow`;
     try {
         const response = await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ token: API_TOKEN, text: postText })
+            body: JSON.stringify({ token: API_TOKEN, userid: userId })
         });
         const data = await response.json();
-        if (data.uniqid) console.log(`成功 ID: ${data.uniqid}`);
-    } catch (error) {
-        console.error('ランダム投稿エラー:', error);
+        return data.success ? data : null;
+    } catch (e) {
+        console.error(`フォローAPI通信エラー (対象: ${userId}):`, e.message);
+        return null;
     }
-    setTimeout(randomPostLoop, getRandomInterval());
+}
+
+async function getTimeline(limit = 30) {
+    const url = `https://${API_DOMAIN}/api/ueuse/`;
+    try {
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token: API_TOKEN, limit })
+        });
+        const data = await response.json();
+
+        if (Array.isArray(data)) {
+            return data;
+        }
+
+        if (typeof data === 'object' && data !== null) {
+            return Object.values(data).filter(item => 
+                typeof item === 'object' && item !== null && item.uniqid
+            );
+        }
+
+        return [];
+    } catch (e) {
+        console.error("タイムライン取得エラー:", e.message);
+        return [];
+    }
 }
 
 async function getMentions() {
-    const url = `https://${API_DOMAIN}/api/ueuse/mentions.php`;
+    const url = `https://${API_DOMAIN}/api/ueuse/mentions`;
     try {
         const response = await fetch(url, {
             method: 'POST',
@@ -125,8 +154,10 @@ async function getMentions() {
             body: JSON.stringify({ token: API_TOKEN })
         });
         const data = await response.json();
-        return data.success ? Object.values(data).filter(item => typeof item === 'object') : [];
-    } catch (error) { return []; }
+        return Array.isArray(data) ? data : [];
+    } catch (error) {
+        return [];
+    }
 }
 
 async function getReplies() {
@@ -139,40 +170,24 @@ async function getReplies() {
         });
         const data = await response.json();
         return data.success ? Object.values(data).filter(item => typeof item === 'object' && item.category === 'reply' && item.valueid !== null) : [];
-    } catch (error) { return []; }
+    } catch (error) {
+        return [];
+    }
 }
 
 async function getUserInfo(userId) {
     const url = `https://${API_DOMAIN}/api/users/`;
-    const params = {
-        token: API_TOKEN,
-        userid: userId
-    };
-
     try {
         const response = await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(params)
+            body: JSON.stringify({ token: API_TOKEN, userid: userId })
         });
         const data = await response.json();
-        return data.userid ? data : null; 
+        return data.userid ? data : null;
     } catch (error) {
-        console.error(`ユーザー情報取得エラー (ID: ${userId}):`, error);
         return null;
     }
-}
-
-async function replyToPost(replyId, text) {
-    const url = `https://${API_DOMAIN}/api/ueuse/create`;
-    try {
-        const response = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ token: API_TOKEN, text, replyid: replyId })
-        });
-        return await response.json();
-    } catch (error) { return { success: false }; }
 }
 
 async function getPostById(postId) {
@@ -189,10 +204,61 @@ async function getPostById(postId) {
             if (firstKey) return data[firstKey];
         }
         return null;
-    } catch (error) { return null; }
+    } catch (error) {
+        return null;
+    }
 }
 
-// --- 同意確認メッセージ ---
+setApiBridge({
+    postUeuse: async (text) => {
+        return await postUeuse(text);
+    },
+    fetchAgreedTimeline: async (limit = 30) => {
+        const posts = await getTimeline(limit);
+        return posts.filter(p => {
+            if (!p || !p.text || !p.account) return false;
+            if (p.account.is_bot) return false;
+            return isUserAgreed(p.account.userid);
+        });
+    },
+    searchAgreedUeuse: async (keyword, limit = 30) => {
+        const url = `https://${API_DOMAIN}/api/ueuse/search`;
+        try {
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ token: API_TOKEN, keyword, limit })
+            });
+            const data = await response.json();
+
+            let posts = [];
+            if (Array.isArray(data)) {
+                posts = data;
+            } else if (typeof data === 'object' && data !== null) {
+                posts = Object.values(data).filter(item => 
+                    typeof item === 'object' && item !== null && item.uniqid
+                );
+            }
+
+            return posts.filter(p => {
+                if (!p || !p.text || !p.account) return false;
+                if (p.account.is_bot) return false;
+                return isUserAgreed(p.account.userid);
+            });
+        } catch (e) {
+            console.error("検索API通信エラー:", e.message);
+            return [];
+        }
+    },
+    followAgreedUser: async (userId) => {
+        if (!isUserAgreed(userId)) {
+            console.log(`[フォロースキップ] ユーザー「${userId}」は未同意のためフォローを見送りました。`);
+            return null;
+        }
+        return await followUser(userId);
+    }
+});
+
 const CONSENT_TEXT = `### ちょっとまって！
 らなとお話しする前に、以下の内容に同意いただけますか？
 - らなとお話するとらなはお話した内容を学んだり覚えたりします。
@@ -204,21 +270,21 @@ const CONSENT_TEXT = `### ちょっとまって！
 
 -# これはシステムによるメッセージです。らなには届いていません。`;
 
-async function processReply(targetId, studyIds) {
+const pendingTeachMap = new Map();
+
+async function processReply(targetId) {
     const postData = await getPostById(targetId);
     if (!postData || !postData.text || !postData.account) return;
 
     const userId = postData.account.userid;
-    const cleanedText = postData.text.replace(/@\w+\s/, "").trim();
+    const cleanedText = postData.text.replace(/@\w+\s?/, "").trim();
 
     let agreement = getAgreement(userId);
-
     const userInfo = await getUserInfo(userId);
-    
+
     if (agreement && userInfo && userInfo.registered_date) {
         const agreedDate = new Date(agreement.agreed_at);
         const registeredDate = new Date(userInfo.registered_date);
-
         if (registeredDate > agreedDate) {
             console.log(`ユーザー ${userId} のアカウント再作成を検知。同意をリセットします。`);
             revokeAgreement(userId);
@@ -229,10 +295,10 @@ async function processReply(targetId, studyIds) {
     if (!agreement) {
         if (cleanedText === "同意します") {
             setAgreed(userId);
-            await replyToPost(targetId, "同意ありがとうございます！話しかけてみてくださいね\n\n-# これはシステムによるメッセージです。らなには届いていません。");
+            await postUeuse("同意ありがとうございます！話しかけてみてくださいね\n\n-# これはシステムによるメッセージです。らなには届いていません。", targetId);
             addReplied(targetId);
         } else {
-            await replyToPost(targetId, CONSENT_TEXT);
+            await postUeuse(CONSENT_TEXT, targetId);
             addReplied(targetId);
         }
         return;
@@ -240,58 +306,64 @@ async function processReply(targetId, studyIds) {
 
     let replyText = "";
 
-    if (studyIds.has(postData.replyid)) {
-        const QuestionSubData = await getPostById(postData.replyid);
-        if (QuestionSubData && QuestionSubData.replyid) {
-            const QuestionData = await getPostById(QuestionSubData.replyid);
-            replyText = (QuestionData && QuestionData.text) 
-                ? rana.studyInputText(QuestionData.text, cleanedText, userId) 
-                : rana.generateInputText(cleanedText, userId);
-        } else {
-            replyText = rana.generateInputText(cleanedText, userId);
-        }
-        studyIds.delete(postData.replyid);
-    } else {
-        replyText = rana.generateInputText(cleanedText, userId);
+    if (postData.replyid && pendingTeachMap.has(postData.replyid)) {
+        const originalQuestion = pendingTeachMap.get(postData.replyid);
+        pendingTeachMap.delete(postData.replyid);
+
+        replyText = rana.studyInputText(originalQuestion, cleanedText, userId);
+
+        await postUeuse(replyText, targetId);
+        addReplied(targetId);
+        return;
     }
 
+    replyText = await rana.interact(cleanedText, userId);
+
     if (replyText === "ごめんなさい...よくわかりませんでした...") {
-        replyText = replyText+"\nなんと答えれば良いか、教えていただけますか？\n```\nらなちゃんにこう答えてほしい！という理想のメッセージを返信してください！\nそれが求められてる回答なんだ！って感じで学習します！\n何も学習させたくなければ、このユーズには返信しないでください！\n```"
-        const res = await replyToPost(targetId, replyText);
-        if (res.uniqid) studyIds.add(res.uniqid);
+        replyText = replyText + "\nなんと答えれば良いか、教えていただけますか？\n```\nらなちゃんにこう答えてほしい！という理想のメッセージを返信してください！\nそれが求められてる回答なんだ！って感じで学習します！\n何も学習させたくなければ、このユーズには返信しないでください！\n```";
+        const res = await postUeuse(replyText, targetId);
+        if (res && res.uniqid) {
+            pendingTeachMap.set(res.uniqid, cleanedText);
+        }
     } else {
-        if (IS_FILTER === true) replyText = SayFilter(replyText, filter_words.forbiddenWords);
-        await replyToPost(targetId, replyText);
+        await postUeuse(replyText, targetId);
     }
+
     addReplied(targetId);
 }
 
-const studyIds = new Set();
+async function checkMentionsAndReplies() {
+    try {
+        const allMentions = await getMentions();
+        const newMentions = allMentions.filter(m => !isReplied(m.uniqid) && m.account && !m.account.is_bot);
 
-async function main() {
-    console.log(`[${new Date().toLocaleString()}] チェック開始...`);
+        const allReplies = await getReplies();
+        const newReplies = allReplies.filter(r => !isReplied(r.valueid));
 
-    const allMentions = await getMentions();
-    const newMentions = allMentions.filter(m => !isReplied(m.uniqid) && m.account && !m.account.is_bot);
-
-    const allReplies = await getReplies();
-    const newReplies = allReplies.filter(r => !isReplied(r.valueid));
-
-    for (const mention of newMentions) await processReply(mention.uniqid, studyIds);
-    for (const reply of newReplies) await processReply(reply.valueid, studyIds);
-
-    console.log('処理完了。');
+        for (const mention of newMentions) await processReply(mention.uniqid);
+        for (const reply of newReplies) await processReply(reply.valueid);
+    } catch (err) {
+        console.error("ポーリング処理エラー:", err.message);
+    }
 }
 
-rana.init(CORE_LOG).then(() => {
+async function startSystem() {
     migrateFromJson();
-    // 10分ごとにメイン処理を実行
-    setInterval(main, CHECK_INTERVAL);
-    // 最初に一度実行する
-    main();
-    if(RANDOM_UEUSE === true){
-        randomPostLoop();
-    }
-}).catch(err => {
-    console.error("Initialization failed:", err);
+
+    await rana.init();
+
+    rana.start();
+
+    rana.on('speak', (text) => {
+        console.log(`[独り言]: "${text}"`);
+    });
+
+    setInterval(checkMentionsAndReplies, CHECK_INTERVAL);
+    checkMentionsAndReplies();
+
+    console.log("起きた");
+}
+
+startSystem().catch(err => {
+    console.error("システム起動失敗:", err);
 });
