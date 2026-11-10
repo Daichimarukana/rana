@@ -154,8 +154,20 @@ async function getMentions() {
             body: JSON.stringify({ token: API_TOKEN })
         });
         const data = await response.json();
-        return Array.isArray(data) ? data : [];
+
+        if (Array.isArray(data)) {
+            return data;
+        }
+
+        if (typeof data === 'object' && data !== null) {
+            return Object.values(data).filter(item => 
+                typeof item === 'object' && item !== null && item.uniqid
+            );
+        }
+
+        return [];
     } catch (error) {
+        console.error("メンション取得エラー:", error.message);
         return [];
     }
 }
